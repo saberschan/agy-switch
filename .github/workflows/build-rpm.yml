@@ -1,0 +1,104 @@
+name: Build RPM (Fedora)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rpm.yml'
+      - 'src-tauri/tauri.conf.json'
+
+permissions:
+  contents: write
+
+jobs:
+  build-rpm:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            cmake \
+            clang \
+            libclang-dev \
+            pkg-config \
+            rpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Build RPM bundle
+        run: |
+          npm ci
+          npm run tauri build -- --bundles rpm -- --locked
+
+      - name: Inspect RPM
+        run: |
+          set -e
+          cd src-tauri/target/release/bundle/rpm
+          for f in ./*.rpm; do
+            echo "=== $f ==="
+            rpm -qip "$f"
+            echo "--- provides ---"
+            rpm -qp --provides "$f" || true
+            echo "--- requires ---"
+            rpm -qp --requires "$f" || true
+            echo "--- files ---"
+            rpm -qlp "$f" || true
+          done
+          sha256sum ./*.rpm | tee SHA256SUMS.txt
+
+      - name: Get version
+        id: ver
+        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agy-switch-rpm-x86_64
+          path: |
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/rpm/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rpm-v${{ steps.ver.outputs.version }}-build.${{ github.run_number }}
+          name: agy-switch RPM v${{ steps.ver.outputs.version }} (build ${{ github.run_number }})
+          files: |
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/rpm/SHA256SUMS.txt
+          body: |
+            agy-switch v${{ steps.ver.outputs.version }} 的 RPM 包（x86_64，适用于 Fedora）。
+
+            安装：
+
+                sudo dnf install ./agy-switch-*.rpm
+
+            如安装或启动时提示缺少库，先安装运行时依赖：
+
+                sudo dnf install webkit2gtk4.1 libayatana-appindicator-gtk3 librsvg2
